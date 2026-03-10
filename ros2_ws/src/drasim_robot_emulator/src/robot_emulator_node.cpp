@@ -1,4 +1,7 @@
 // drasim_robot_emulator/src/robot_emulator_node.cpp
+// RobotEmulatorNode — exposes MotionEngine via ROS2 services (MovJ, MovL, MovP)
+// and publishes motion state at a configurable rate.
+// Lambdas use explicit types required by ROS2 Jazzy's create_service API.
 #include "drasim_robot_emulator/robot_emulator_node.hpp"
 #include <array>
 #include <chrono>
@@ -18,14 +21,24 @@ RobotEmulatorNode::RobotEmulatorNode(const rclcpp::NodeOptions & options)
   state_pub_ = this->create_publisher<drasim_interfaces::msg::MotionState>(
     "/drasim/motion_state", rclcpp::QoS(10));
 
+  // Use explicit shared_ptr types — required by ROS2 Jazzy's create_service.
   mov_j_srv_ = this->create_service<drasim_interfaces::srv::MovJ>(
-    "/drasim/mov_j", [this](auto q, auto r) { handle_mov_j(q, r); });
+    "/drasim/mov_j",
+    [this](std::shared_ptr<drasim_interfaces::srv::MovJ::Request> q,
+           std::shared_ptr<drasim_interfaces::srv::MovJ::Response> r)
+    { handle_mov_j(q, r); });
 
   mov_l_srv_ = this->create_service<drasim_interfaces::srv::MovL>(
-    "/drasim/mov_l", [this](auto q, auto r) { handle_mov_l(q, r); });
+    "/drasim/mov_l",
+    [this](std::shared_ptr<drasim_interfaces::srv::MovL::Request> q,
+           std::shared_ptr<drasim_interfaces::srv::MovL::Response> r)
+    { handle_mov_l(q, r); });
 
   mov_p_srv_ = this->create_service<drasim_interfaces::srv::MovP>(
-    "/drasim/mov_p", [this](auto q, auto r) { handle_mov_p(q, r); });
+    "/drasim/mov_p",
+    [this](std::shared_ptr<drasim_interfaces::srv::MovP::Request> q,
+           std::shared_ptr<drasim_interfaces::srv::MovP::Response> r)
+    { handle_mov_p(q, r); });
 
   auto period = std::chrono::milliseconds(1000 / rate_hz);
   timer_ = this->create_wall_timer(period, [this] { publish_motion_state(); });
@@ -72,7 +85,8 @@ void RobotEmulatorNode::handle_mov_l(
     req->acc_mms2  > 0.0 ? req->acc_mms2  : 10.0,
     req->dec_mms2  > 0.0 ? req->dec_mms2  : 10.0,
     req->use_pass);
-  res->success = ok; res->message = ok ? "OK" : "Motion error";
+  res->success = ok;
+  res->message = ok ? "OK" : "Motion error";
 }
 
 void RobotEmulatorNode::handle_mov_p(
@@ -88,7 +102,8 @@ void RobotEmulatorNode::handle_mov_p(
     req->acc_pct   > 0.0 ? req->acc_pct   : 10.0,
     req->dec_pct   > 0.0 ? req->dec_pct   : 10.0,
     req->use_pass);
-  res->success = ok; res->message = ok ? "OK" : "Motion error";
+  res->success = ok;
+  res->message = ok ? "OK" : "Motion error";
 }
 
 }  // namespace drasim_robot_emulator

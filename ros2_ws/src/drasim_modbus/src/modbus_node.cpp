@@ -2,6 +2,7 @@
 // ModbusNode — ROS2 service node that exposes ReadModbus / WriteModbus services.
 // Register access uses the dictionary-backed MemoryImage: raw Modbus addresses
 // are passed directly to read_word / write_word / read_dword / write_dword.
+// Lambdas use explicit types required by ROS2 Jazzy's create_service API.
 #include "drasim_modbus/modbus_node.hpp"
 #include <drasim_core/memory_image.hpp>
 #include <drasim_core/modbus_mapping.hpp>
@@ -28,13 +29,18 @@ ModbusNode::ModbusNode(const rclcpp::NodeOptions & o)
   ep_ = this->create_publisher<drasim_interfaces::msg::ModbusRegister>(
     "/drasim/modbus_event", rclcpp::QoS(10));
 
+  // Use explicit shared_ptr types — required by ROS2 Jazzy's create_service.
   rs_ = this->create_service<drasim_interfaces::srv::ReadModbus>(
     "/drasim/read_modbus",
-    [this](auto q, auto r) { handle_read(q, r); });
+    [this](std::shared_ptr<drasim_interfaces::srv::ReadModbus::Request> q,
+           std::shared_ptr<drasim_interfaces::srv::ReadModbus::Response> r)
+    { handle_read(q, r); });
 
   ws_ = this->create_service<drasim_interfaces::srv::WriteModbus>(
     "/drasim/write_modbus",
-    [this](auto q, auto r) { handle_write(q, r); });
+    [this](std::shared_ptr<drasim_interfaces::srv::WriteModbus::Request> q,
+           std::shared_ptr<drasim_interfaces::srv::WriteModbus::Response> r)
+    { handle_write(q, r); });
 }
 
 ModbusNode::~ModbusNode()

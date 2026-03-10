@@ -1,10 +1,10 @@
 #ifndef DRASIM_CORE__MEMORY_IMAGE_HPP_
 #define DRASIM_CORE__MEMORY_IMAGE_HPP_
 
-#include <array>
 #include <cstdint>
 #include <mutex>
 #include <string>
+#include <unordered_map>
 
 namespace drasim_core
 {
@@ -12,16 +12,19 @@ namespace drasim_core
 /**
  * @brief MemoryImage — thread-safe single source of truth for all IO and Modbus registers.
  *
- * Modbus address space:
+ * Modbus register storage is dictionary-based: an unordered_map keyed by the
+ * raw Modbus address (uint32_t).  Valid address ranges are:
  *   0x1000 – 0x1FFF : DI/DO mirror registers
  *   0x3000 – 0x3FFF : General-purpose application registers
+ *
+ * read_word / write_word / read_dword / write_dword all accept the Modbus
+ * address directly – no external index translation is required.
  */
 class MemoryImage
 {
 public:
-  static constexpr std::size_t DI_COUNT  = 24;
-  static constexpr std::size_t DO_COUNT  = 12;
-  static constexpr std::size_t REG_COUNT = 4096;
+  static constexpr std::size_t DI_COUNT = 24;
+  static constexpr std::size_t DO_COUNT = 12;
 
   // PUBLIC_INTERFACE
   /** @brief Singleton accessor. */
@@ -52,28 +55,45 @@ public:
   uint32_t get_do_block(std::size_t start_pin, std::size_t length) const;
 
   // PUBLIC_INTERFACE
-  /** @brief Read a 16-bit Modbus register. */
-  int16_t read_word(uint32_t index) const;
+  /**
+   * @brief Read a 16-bit Modbus register.
+   * @param address  Raw Modbus address (e.g. 0x1000 – 0x3FFF).
+   * @return Stored value, or 0 if the address has never been written.
+   */
+  int16_t read_word(uint32_t address) const;
 
   // PUBLIC_INTERFACE
-  /** @brief Write a 16-bit Modbus register. */
-  void write_word(uint32_t index, int16_t value);
+  /**
+   * @brief Write a 16-bit Modbus register.
+   * @param address  Raw Modbus address.
+   * @param value    Value to store.
+   */
+  void write_word(uint32_t address, int16_t value);
 
   // PUBLIC_INTERFACE
-  /** @brief Read a 32-bit Modbus register pair (address must be even). */
-  int32_t read_dword(uint32_t index) const;
+  /**
+   * @brief Read a 32-bit Modbus register pair (address must be even).
+   * Low word is at @p address, high word at @p address+1.
+   * @param address  Raw Modbus base address (must be even).
+   * @return 32-bit signed value, or 0 on alignment error.
+   */
+  int32_t read_dword(uint32_t address) const;
 
   // PUBLIC_INTERFACE
-  /** @brief Write a 32-bit Modbus register pair (address must be even). */
-  void write_dword(uint32_t index, int32_t value);
+  /**
+   * @brief Write a 32-bit Modbus register pair (address must be even).
+   * Low word is stored at @p address, high word at @p address+1.
+   * @param address  Raw Modbus base address (must be even).
+   * @param value    32-bit signed value to store.
+   */
+  void write_dword(uint32_t address, int32_t value);
 
   // PUBLIC_INTERFACE
-  /** @brief Const pointer to raw 16-bit register array. */
-  const int16_t * raw_registers() const { return registers_.data(); }
-
-  // PUBLIC_INTERFACE
-  /** @brief Mutable pointer to raw 16-bit register array. */
-  int16_t * raw_registers_mutable() { return registers_.data(); }
+  /**
+   * @brief Return a snapshot copy of the entire register map.
+   * Useful for diagnostic / serialisation purposes.
+   */
+  std::unordered_map<uint32_t, int16_t> snapshot_registers() const;
 
 private:
   MemoryImage() = default;
@@ -81,9 +101,10 @@ private:
   MemoryImage & operator=(const MemoryImage &) = delete;
 
   mutable std::mutex mutex_;
-  std::array<bool, DI_COUNT>     di_pins_{};
-  std::array<bool, DO_COUNT>     do_pins_{};
-  std::array<int16_t, REG_COUNT> registers_{};
+  bool di_pins_[DI_COUNT]{};
+  bool do_pins_[DO_COUNT]{};
+  /// Register store: key = Modbus address, value = 16-bit register value.
+  std::unordered_map<uint32_t, int16_t> registers_;
 };
 
 }  // namespace drasim_core

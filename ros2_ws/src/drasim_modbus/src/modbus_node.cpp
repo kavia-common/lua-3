@@ -1,4 +1,7 @@
 // drasim_modbus/src/modbus_node.cpp
+// ModbusNode — ROS2 service node that exposes ReadModbus / WriteModbus services.
+// Register access uses the dictionary-backed MemoryImage: raw Modbus addresses
+// are passed directly to read_word / write_word / read_dword / write_dword.
 #include "drasim_modbus/modbus_node.hpp"
 #include <drasim_core/memory_image.hpp>
 #include <drasim_core/modbus_mapping.hpp>
@@ -44,18 +47,30 @@ void ModbusNode::handle_read(
   std::shared_ptr<drasim_interfaces::srv::ReadModbus::Response> res)
 {
   uint32_t addr = req->reg_address;
+
+  // Validate that the address falls within a supported Modbus range.
   if (!drasim_core::ModbusMapping::is_valid(addr)) {
-    res->success = false; res->message = "Invalid address"; return;
+    res->success = false;
+    res->message = "Invalid address: 0x" + std::to_string(addr);
+    return;
   }
-  auto idx = drasim_core::ModbusMapping::to_register_index(addr);
+
   auto & mem = drasim_core::MemoryImage::instance();
+
   if (req->size == "DW") {
-    if (addr % 2 != 0) { res->success = false; res->message = "DW needs even addr"; return; }
-    res->value = mem.read_dword((uint32_t)idx);
+    if (addr % 2 != 0) {
+      res->success = false;
+      res->message = "DW read requires an even Modbus address";
+      return;
+    }
+    // Pass the raw Modbus address — MemoryImage now handles dictionary lookup.
+    res->value = mem.read_dword(addr);
   } else {
-    res->value = mem.read_word((uint32_t)idx);
+    res->value = static_cast<int32_t>(mem.read_word(addr));
   }
-  res->success = true; res->message = "OK";
+
+  res->success = true;
+  res->message = "OK";
 }
 
 void ModbusNode::handle_write(
@@ -63,22 +78,38 @@ void ModbusNode::handle_write(
   std::shared_ptr<drasim_interfaces::srv::WriteModbus::Response> res)
 {
   uint32_t addr = req->reg_address;
+
+  // Validate that the address falls within a supported Modbus range.
   if (!drasim_core::ModbusMapping::is_valid(addr)) {
-    res->success = false; res->message = "Invalid address"; return;
+    res->success = false;
+    res->message = "Invalid address: 0x" + std::to_string(addr);
+    return;
   }
-  auto idx = drasim_core::ModbusMapping::to_register_index(addr);
+
   auto & mem = drasim_core::MemoryImage::instance();
+
   if (req->size == "DW") {
-    if (addr % 2 != 0) { res->success = false; res->message = "DW needs even addr"; return; }
-    mem.write_dword((uint32_t)idx, req->reg_value);
+    if (addr % 2 != 0) {
+      res->success = false;
+      res->message = "DW write requires an even Modbus address";
+      return;
+    }
+    // Pass the raw Modbus address — MemoryImage now handles dictionary lookup.
+    mem.write_dword(addr, req->reg_value);
   } else {
-    mem.write_word((uint32_t)idx, (int16_t)req->reg_value);
+    mem.write_word(addr, static_cast<int16_t>(req->reg_value));
   }
+
+  // Publish a change notification event on the Modbus event topic.
   drasim_interfaces::msg::ModbusRegister ev;
-  ev.stamp = this->now(); ev.address = addr;
-  ev.data_type = req->size; ev.value = req->reg_value;
+  ev.stamp     = this->now();
+  ev.address   = addr;
+  ev.data_type = req->size;
+  ev.value     = req->reg_value;
   ep_->publish(ev);
-  res->success = true; res->message = "OK";
+
+  res->success = true;
+  res->message = "OK";
 }
 
 }  // namespace drasim_modbus

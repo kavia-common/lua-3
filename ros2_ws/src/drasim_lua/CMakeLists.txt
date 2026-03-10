@@ -22,6 +22,7 @@ add_library(lua54_static STATIC
   ${LUA_SRC_DIR}/lctype.c
   ${LUA_SRC_DIR}/ldblib.c
   ${LUA_SRC_DIR}/ldebug.c
+  ${LUA_SRC_DIR}/ldeltaapi.c
   ${LUA_SRC_DIR}/ldo.c
   ${LUA_SRC_DIR}/ldump.c
   ${LUA_SRC_DIR}/lfunc.c

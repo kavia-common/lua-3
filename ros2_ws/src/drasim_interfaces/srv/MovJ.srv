@@ -1,0 +1,8 @@
+int32 joint
+float64 degree
+float64 speed_pct
+float64 acc_pct
+float64 dec_pct
+---
+bool success
+string message

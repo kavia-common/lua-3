@@ -1,0 +1,7 @@
+string pin_index
+int32 length
+---
+string status
+int32 status_num
+bool success
+string message

@@ -1,0 +1,16 @@
+cmake_minimum_required(VERSION 3.8)
+project(drasim_modbus)
+if(CMAKE_COMPILER_IS_GNUCXX OR CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+  add_compile_options(-Wall -Wextra -Wpedantic)
+endif()
+find_package(ament_cmake REQUIRED)
+find_package(rclcpp REQUIRED)
+find_package(drasim_interfaces REQUIRED)
+find_package(drasim_core REQUIRED)
+add_executable(modbus_node src/modbus_node_main.cpp src/modbus_node.cpp src/modbus_tcp_server.cpp)
+target_include_directories(modbus_node PUBLIC
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+  $<INSTALL_INTERFACE:include>)
+ament_target_dependencies(modbus_node rclcpp drasim_interfaces drasim_core)
+install(TARGETS modbus_node DESTINATION lib/${PROJECT_NAME})
+ament_package()

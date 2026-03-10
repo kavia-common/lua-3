@@ -1,0 +1,6 @@
+string pin_index
+string status
+float64 delay_time
+---
+bool success
+string message

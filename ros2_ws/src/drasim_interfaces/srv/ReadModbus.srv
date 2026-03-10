@@ -1,0 +1,6 @@
+uint32 reg_address
+string size
+---
+int32 value
+bool success
+string message

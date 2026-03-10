@@ -1,0 +1,9 @@
+string point
+float64[6] offset
+float64 speed_pct
+float64 acc_pct
+float64 dec_pct
+bool use_pass
+---
+bool success
+string message

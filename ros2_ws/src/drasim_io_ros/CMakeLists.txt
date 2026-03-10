@@ -1,0 +1,17 @@
+cmake_minimum_required(VERSION 3.8)
+project(drasim_io_ros)
+if(CMAKE_COMPILER_IS_GNUCXX OR CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+  add_compile_options(-Wall -Wextra -Wpedantic)
+endif()
+find_package(ament_cmake REQUIRED)
+find_package(rclcpp REQUIRED)
+find_package(std_msgs REQUIRED)
+find_package(drasim_interfaces REQUIRED)
+find_package(drasim_core REQUIRED)
+add_executable(io_node src/io_node_main.cpp src/io_node.cpp)
+target_include_directories(io_node PUBLIC
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+  $<INSTALL_INTERFACE:include>)
+ament_target_dependencies(io_node rclcpp std_msgs drasim_interfaces drasim_core)
+install(TARGETS io_node DESTINATION lib/${PROJECT_NAME})
+ament_package()

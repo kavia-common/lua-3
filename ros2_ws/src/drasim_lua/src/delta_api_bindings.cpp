@@ -529,23 +529,151 @@ static int l_WAIT(lua_State * L)
 }
 
 // ---------------------------------------------------------------------------
-// AuxTasksAdd / AuxTasks
+// AuxTasksAdd / AuxTasks  — round-robin cooperative multi-task scheduler
+//
+// Design
+// ------
+//  AuxTasksAdd(fn1, fn2, ...) stores each Lua function as a reference in the
+//  Lua registry (luaL_ref).  Up to MAX_AUX_TASKS functions are accepted.
+//
+//  AuxTasks() picks the next function in round-robin order, calls it with
+//  lua_pcall (so errors are caught and reported rather than crashing), then
+//  advances the index.  This matches the Delta controller behaviour where each
+//  call to AuxTasks() gives one 15-ms slice to the next registered function.
 // ---------------------------------------------------------------------------
 
+/// Maximum number of aux-task functions supported (matches Delta API limit).
+static constexpr int MAX_AUX_TASKS = 10;
+
+/// Lua registry references for the registered aux-task functions.
+/// LUA_NOREF signals an empty slot.
+static int aux_task_refs[MAX_AUX_TASKS];
+
+/// Number of functions currently registered.
+static int aux_task_count = 0;
+
+/// Index of the function to invoke on the next AuxTasks() call (0-based).
+static int aux_task_index = 0;
+
+/// Flag: has AuxTasksAdd been called at least once?
+static bool aux_tasks_initialized = false;
+
+/// Reset all aux-task state (called from AuxTasksAdd before re-registering).
+static void reset_aux_tasks(lua_State * L)
+{
+  for (int i = 0; i < MAX_AUX_TASKS; ++i) {
+    if (aux_task_refs[i] != LUA_NOREF && aux_task_refs[i] != LUA_REFNIL) {
+      luaL_unref(L, LUA_REGISTRYINDEX, aux_task_refs[i]);
+    }
+    aux_task_refs[i] = LUA_NOREF;
+  }
+  aux_task_count = 0;
+  aux_task_index = 0;
+}
+
 // PUBLIC_INTERFACE
-/// AuxTasksAdd(fn1, fn2, ...) - Register up to 10 sub-functions for time-sliced execution.
+/**
+ * @brief AuxTasksAdd(fn1 [, fn2, ...]) — register Lua functions for round-robin execution.
+ *
+ * Stores each argument (which must be a Lua function) as a Lua registry
+ * reference.  Up to MAX_AUX_TASKS (10) functions may be registered.
+ * Calling AuxTasksAdd again replaces the previously registered set.
+ *
+ * @param L  Active Lua state.  Stack must contain callable Lua functions.
+ * @return 0 (no values pushed onto stack).
+ */
 static int l_AuxTasksAdd(lua_State * L)
 {
-  std::cout << "[DeltaAPI] AuxTasksAdd: " << lua_gettop(L) << " funcs (stub)\n";
+  int n = lua_gettop(L);
+
+  // Release any previously registered functions
+  reset_aux_tasks(L);
+
+  // Cap at MAX_AUX_TASKS
+  if (n > MAX_AUX_TASKS) {
+    std::cerr << "[DeltaAPI] AuxTasksAdd: " << n << " functions given; "
+              << "only first " << MAX_AUX_TASKS << " will be used.\n";
+    n = MAX_AUX_TASKS;
+  }
+
+  for (int i = 1; i <= n; ++i) {
+    if (!lua_isfunction(L, i)) {
+      std::cerr << "[DeltaAPI] AuxTasksAdd: argument " << i
+                << " is not a function (type=" << lua_typename(L, lua_type(L, i))
+                << "); skipping.\n";
+      aux_task_refs[aux_task_count] = LUA_NOREF;
+    } else {
+      lua_pushvalue(L, i);                          // push copy to top
+      aux_task_refs[aux_task_count] = luaL_ref(L, LUA_REGISTRYINDEX);  // store ref, pops
+    }
+    ++aux_task_count;
+  }
+
+  aux_task_index        = 0;
+  aux_tasks_initialized = true;
+
+  std::cout << "[DeltaAPI] AuxTasksAdd: registered " << aux_task_count
+            << " function(s) for round-robin execution.\n";
   return 0;
 }
 
 // PUBLIC_INTERFACE
-/// AuxTasks() - Execute one 15ms slice of each registered sub-function.
+/**
+ * @brief AuxTasks() — invoke the next registered sub-function in round-robin order.
+ *
+ * On each call, one function from the list registered via AuxTasksAdd() is
+ * executed via lua_pcall.  If the call raises a Lua error the error message is
+ * printed and execution continues with the next cycle — the scheduler is not
+ * aborted.  After all functions have been given a turn, the index wraps back to
+ * the first function.
+ *
+ * If no functions have been registered this call is a no-op (returns
+ * immediately without sleeping).
+ *
+ * @param L  Active Lua state.
+ * @return 0 (no values pushed onto stack).
+ */
 static int l_AuxTasks(lua_State * L)
 {
-  (void)L;
-  std::this_thread::sleep_for(std::chrono::milliseconds(15));
+  if (!aux_tasks_initialized || aux_task_count == 0) {
+    // Nothing registered — yield a small sleep to avoid busy-loop
+    std::this_thread::sleep_for(std::chrono::milliseconds(15));
+    return 0;
+  }
+
+  // Find the next valid (non-NOREF) slot in round-robin fashion.
+  // We try at most aux_task_count slots to handle gaps.
+  int tried = 0;
+  while (tried < aux_task_count) {
+    int slot = aux_task_index % aux_task_count;
+    aux_task_index = (slot + 1) % aux_task_count;  // advance for next call
+    ++tried;
+
+    int ref = aux_task_refs[slot];
+    if (ref == LUA_NOREF || ref == LUA_REFNIL) {
+      continue;  // slot was skipped during registration
+    }
+
+    // Push the function from the registry onto the stack
+    lua_rawgeti(L, LUA_REGISTRYINDEX, ref);
+
+    if (!lua_isfunction(L, -1)) {
+      lua_pop(L, 1);
+      continue;
+    }
+
+    // Call the function with zero arguments and zero expected results.
+    // Use lua_pcall so errors don't propagate and kill the scheduler.
+    int rc = lua_pcall(L, 0, 0, 0);
+    if (rc != LUA_OK) {
+      const char * err = lua_tostring(L, -1);
+      std::cerr << "[DeltaAPI] AuxTasks: error in slot " << slot
+                << ": " << (err ? err : "(unknown error)") << "\n";
+      lua_pop(L, 1);  // pop error message
+    }
+    break;  // one function per AuxTasks() call — round-robin
+  }
+
   return 0;
 }
 
@@ -843,6 +971,14 @@ static const luaL_Reg delta_api_funcs[] = {
  */
 void register_delta_api(lua_State * L)
 {
+  // Initialise aux-task scheduler state (idempotent on repeated calls)
+  for (int i = 0; i < MAX_AUX_TASKS; ++i) {
+    aux_task_refs[i] = LUA_NOREF;
+  }
+  aux_task_count        = 0;
+  aux_task_index        = 0;
+  aux_tasks_initialized = false;
+
   // Register metatables
   register_point_expr_mt(L);
   register_socket_mt(L);

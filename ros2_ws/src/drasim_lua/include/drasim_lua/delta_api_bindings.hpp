@@ -33,7 +33,10 @@ namespace drasim_lua
  *     MovJ(joint, deg)        — joint move to angle
  *     MovL(point[+offsets])   — linear move to point
  *     MovP(point[+offsets])   — PTP move to point
- *     DELAY(sec)              — pause execution
+ *
+ *   Cooperative yielding primitives (coroutine-based scheduling):
+ *     DELAY(sec)              — yields for sec seconds (does not block OS thread)
+ *     WAIT(...)               — yields briefly to allow time-slicing while "waiting"
  *
  *   Speed/Accuracy:
  *     SpdJ(%), AccJ(%), DecJ(%), SpdL(mm/s), AccL(mm/s2), DecL(mm/s2)
@@ -51,9 +54,9 @@ namespace drasim_lua
  *     WAIT(io_type, pin, status[, timeout_ms])
  *     WAIT(ExtDI, {addr,pin}, status[, timeout_ms])
  *
- *   Multi-task:
- *     AuxTasksAdd(fn1, fn2, ...)
- *     AuxTasks()
+ *   Multi-task (coroutine scheduler):
+ *     AuxTasksAdd(fn1, fn2, ...)  — creates one coroutine per function
+ *     AuxTasks()                 — resumes one runnable coroutine round-robin
  *
  *   Utility:
  *     split(str, pat)         — split string by delimiter, return table

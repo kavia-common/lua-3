@@ -3,7 +3,14 @@
 // Modbus register access now uses the dictionary-backed MemoryImage:
 // raw Modbus addresses are passed directly — no index translation required.
 //
-// This version adds:
+// Coroutine-based AuxTasks implementation:
+//   - AuxTasksAdd(fn1, fn2, ...) creates a Lua coroutine per function via lua_newthread
+//     and stores a registry reference to keep it alive.
+//   - AuxTasks() round-robins across coroutines and resumes one step via lua_resume.
+//   - DELAY/WAIT are implemented as yieldable primitives: they yield back to the host
+//     scheduler so long-running tasks can be time-sliced without blocking.
+//
+// This version also provides:
 //   - ON / OFF global constants (string "ON" / "OFF")
 //   - SocketClass constructor + :Send() / :Receive() / :Close() methods
 //     with simulated handshake responses to prevent infinite loops
@@ -24,7 +31,6 @@ extern "C" {
 #include <drasim_core/io_mapping.hpp>
 #include <drasim_core/modbus_mapping.hpp>
 
-#include <atomic>
 #include <chrono>
 #include <cstddef>
 #include <iostream>
@@ -43,6 +49,17 @@ namespace drasim_lua
 // ---------------------------------------------------------------------------
 static bool status_to_bool(const char * s) { return s && std::string(s) == "ON"; }
 static void push_on_off(lua_State * L, bool v) { lua_pushstring(L, v ? "ON" : "OFF"); }
+
+// We encode DELAY/WAIT yields as a single yielded number: seconds to sleep.
+// AuxTasks() reads this and stores it in per-task wakeup times.
+static constexpr int LUA_YIELD_RETCOUNT = 1;
+
+static double now_seconds_monotonic()
+{
+  using clock = std::chrono::steady_clock;
+  const auto tp = clock::now().time_since_epoch();
+  return std::chrono::duration<double>(tp).count();
+}
 
 // ---------------------------------------------------------------------------
 // ExtDI / ExtDO in-process state (addr -> pin -> bool)
@@ -415,13 +432,18 @@ static int l_MovP(lua_State * L)
   return 0;
 }
 
+// ---------------------------------------------------------------------------
+// Yielding primitives
+// ---------------------------------------------------------------------------
+
 // PUBLIC_INTERFACE
-/// DELAY(seconds) - Pause execution for the specified number of seconds.
+/// DELAY(seconds) - Yield for the specified number of seconds (cooperative scheduling).
 static int l_DELAY(lua_State * L)
 {
-  double s = luaL_checknumber(L, 1);
-  if (s > 0.0) { std::this_thread::sleep_for(std::chrono::duration<double>(s)); }
-  return 0;
+  const double s = luaL_checknumber(L, 1);
+  // Yield to scheduler; AuxTasks() will resume this coroutine after s seconds.
+  lua_pushnumber(L, s > 0.0 ? s : 0.0);
+  return lua_yield(L, LUA_YIELD_RETCOUNT);
 }
 
 static int l_SpdJ(lua_State * L)
@@ -487,109 +509,104 @@ static int l_ReadPoint(lua_State * L)
 //   WAIT(DI/DO, pin, "ON"/"OFF" [, timeout_ms])
 //   WAIT(ExtDI, {addr, pin}, "ON"/"OFF" [, timeout_ms])
 //   WAIT(DI, {p1,p2,...}, "ON"/"OFF" [, timeout_ms])
+//
+// Coroutine version: yields with a small slice so callers spinning in loops
+// can be time-sliced. In this simulation we generally satisfy immediately,
+// but we still yield once to enable cooperative scheduling and avoid blocking.
 // ---------------------------------------------------------------------------
 
 // PUBLIC_INTERFACE
 /// WAIT(io_type, pin_or_table, status [, timeout_ms])
-/// Waits until the specified I/O signal reaches the target state.
-/// In simulation, ExtDI always satisfies immediately. DI/DO set to target.
+/// Cooperative wait: yields back to scheduler to time-slice long-running scripts.
+/// In simulation, conditions are generally satisfied immediately (ExtDI always ON).
 static int l_WAIT(lua_State * L)
 {
   if (!lua_isstring(L, 1)) { return 0; }
   std::string io_type = lua_tostring(L, 1);
 
-  if (io_type == "ExtDI") {
-    // ExtDI is always "ON" in simulation, so always satisfied immediately
-    return 0;
-  }
-
-  if (io_type == "DI" || io_type == "DO") {
-    // Table form — just return immediately in simulation
-    if (lua_istable(L, 2)) { return 0; }
-
-    int pin     = (int)luaL_checkinteger(L, 2);
-    bool target = status_to_bool(luaL_checkstring(L, 3));
-    double tms  = luaL_optnumber(L, 4, -1.0);
-
-    // In simulation, set the IO to the target state immediately
-    // and break out of any waiting loop
-    if (io_type == "DI") {
-      drasim_core::MemoryImage::instance().set_di((std::size_t)pin, target);
-    } else {
-      drasim_core::MemoryImage::instance().set_do((std::size_t)pin, target);
-    }
-
-    // Still do a short real wait if timeout was given and is very small,
-    // so we don't busy-loop if caller retries
-    if (tms > 0.0 && tms < 50.0) {
-      std::this_thread::sleep_for(std::chrono::milliseconds(1));
-    }
-  }
-  return 0;
+  // In the real controller, WAIT blocks until condition or timeout.
+  // Here we emulate "non-blocking" by yielding briefly; scripts that call WAIT
+  // inside loops will give time back to AuxTasks.
+  // Use ~15ms slice like Delta docs mention.
+  lua_pushnumber(L, 0.015);
+  return lua_yield(L, LUA_YIELD_RETCOUNT);
 }
 
 // ---------------------------------------------------------------------------
-// AuxTasksAdd / AuxTasks  — round-robin cooperative multi-task scheduler
+// AuxTasksAdd / AuxTasks  — coroutine-based cooperative multi-task scheduler
 //
 // Design
 // ------
-//  AuxTasksAdd(fn1, fn2, ...) stores each Lua function as a reference in the
-//  Lua registry (luaL_ref).  Up to MAX_AUX_TASKS functions are accepted.
+//  AuxTasksAdd(fn1, fn2, ...) creates a Lua thread (coroutine) for each fn.
+//  The function is moved onto the thread's stack and resumed once to start.
 //
-//  AuxTasks() picks the next function in round-robin order, calls it with
-//  lua_pcall (so errors are caught and reported rather than crashing), then
-//  advances the index.  This matches the Delta controller behaviour where each
-//  call to AuxTasks() gives one 15-ms slice to the next registered function.
+//  DELAY/WAIT yield a single numeric return: seconds to sleep.
+//  AuxTasks() stores per-thread wakeup time and only resumes runnable threads.
+//
+//  This structure allows a long-running fn containing `while true do ... end`
+//  to still make progress if it calls DELAY/WAIT (or any other yielding API).
 // ---------------------------------------------------------------------------
 
-/// Maximum number of aux-task functions supported (matches Delta API limit).
 static constexpr int MAX_AUX_TASKS = 10;
 
-/// Lua registry references for the registered aux-task functions.
-/// LUA_NOREF signals an empty slot.
-static int aux_task_refs[MAX_AUX_TASKS];
+struct AuxTask
+{
+  lua_State * thread{nullptr}; // coroutine
+  int thread_ref{LUA_NOREF};   // registry ref holding the coroutine object alive
+  bool alive{false};           // still runnable? (not completed)
+  double wake_at{0.0};         // monotonic seconds; runnable when now >= wake_at
+};
 
-/// Number of functions currently registered.
+static AuxTask aux_tasks[MAX_AUX_TASKS];
 static int aux_task_count = 0;
-
-/// Index of the function to invoke on the next AuxTasks() call (0-based).
 static int aux_task_index = 0;
-
-/// Flag: has AuxTasksAdd been called at least once?
 static bool aux_tasks_initialized = false;
 
-/// Reset all aux-task state (called from AuxTasksAdd before re-registering).
 static void reset_aux_tasks(lua_State * L)
 {
   for (int i = 0; i < MAX_AUX_TASKS; ++i) {
-    if (aux_task_refs[i] != LUA_NOREF && aux_task_refs[i] != LUA_REFNIL) {
-      luaL_unref(L, LUA_REGISTRYINDEX, aux_task_refs[i]);
+    if (aux_tasks[i].thread_ref != LUA_NOREF && aux_tasks[i].thread_ref != LUA_REFNIL) {
+      luaL_unref(L, LUA_REGISTRYINDEX, aux_tasks[i].thread_ref);
     }
-    aux_task_refs[i] = LUA_NOREF;
+    aux_tasks[i] = AuxTask{};
   }
   aux_task_count = 0;
   aux_task_index = 0;
+  aux_tasks_initialized = false;
+}
+
+// Parse yielded sleep seconds from thread stack (top), defaulting to 0.
+static double parse_yield_sleep_seconds(lua_State * thread)
+{
+  if (lua_gettop(thread) >= 1 && lua_isnumber(thread, -1)) {
+    const double s = lua_tonumber(thread, -1);
+    lua_settop(thread, 0); // clear yielded values
+    return (s > 0.0) ? s : 0.0;
+  }
+  lua_settop(thread, 0);
+  return 0.0;
 }
 
 // PUBLIC_INTERFACE
 /**
- * @brief AuxTasksAdd(fn1 [, fn2, ...]) — register Lua functions for round-robin execution.
+ * @brief AuxTasksAdd(fn1 [, fn2, ...]) — register Lua functions for coroutine time-slicing.
  *
- * Stores each argument (which must be a Lua function) as a Lua registry
- * reference.  Up to MAX_AUX_TASKS (10) functions may be registered.
+ * Each argument must be a Lua function. For each function, we create a coroutine
+ * via lua_newthread(), store a registry reference to keep it alive, move the
+ * function onto the coroutine stack, and mark it runnable.
+ *
  * Calling AuxTasksAdd again replaces the previously registered set.
  *
- * @param L  Active Lua state.  Stack must contain callable Lua functions.
- * @return 0 (no values pushed onto stack).
+ * @param L Active Lua main state.
+ * @return 0
  */
 static int l_AuxTasksAdd(lua_State * L)
 {
-  int n = lua_gettop(L);
+  const int n_args = lua_gettop(L);
 
-  // Release any previously registered functions
   reset_aux_tasks(L);
 
-  // Cap at MAX_AUX_TASKS
+  int n = n_args;
   if (n > MAX_AUX_TASKS) {
     std::cerr << "[DeltaAPI] AuxTasksAdd: " << n << " functions given; "
               << "only first " << MAX_AUX_TASKS << " will be used.\n";
@@ -601,77 +618,106 @@ static int l_AuxTasksAdd(lua_State * L)
       std::cerr << "[DeltaAPI] AuxTasksAdd: argument " << i
                 << " is not a function (type=" << lua_typename(L, lua_type(L, i))
                 << "); skipping.\n";
-      aux_task_refs[aux_task_count] = LUA_NOREF;
-    } else {
-      lua_pushvalue(L, i);                          // push copy to top
-      aux_task_refs[aux_task_count] = luaL_ref(L, LUA_REGISTRYINDEX);  // store ref, pops
+      continue;
     }
+
+    // Create coroutine; pushes thread object onto main stack.
+    lua_State * T = lua_newthread(L);
+
+    // Store registry ref to keep coroutine alive (pops thread object).
+    const int tref = luaL_ref(L, LUA_REGISTRYINDEX);
+
+    // Move function onto the coroutine's stack (as its entry function).
+    lua_pushvalue(L, i);
+    lua_xmove(L, T, 1);
+
+    AuxTask & task = aux_tasks[aux_task_count];
+    task.thread = T;
+    task.thread_ref = tref;
+    task.alive = true;
+    task.wake_at = 0.0;
+
     ++aux_task_count;
   }
 
-  aux_task_index        = 0;
+  aux_task_index = 0;
   aux_tasks_initialized = true;
 
   std::cout << "[DeltaAPI] AuxTasksAdd: registered " << aux_task_count
-            << " function(s) for round-robin execution.\n";
+            << " coroutine task(s).\n";
   return 0;
 }
 
 // PUBLIC_INTERFACE
 /**
- * @brief AuxTasks() — invoke the next registered sub-function in round-robin order.
+ * @brief AuxTasks() — resume one runnable coroutine in round-robin order.
  *
- * On each call, one function from the list registered via AuxTasksAdd() is
- * executed via lua_pcall.  If the call raises a Lua error the error message is
- * printed and execution continues with the next cycle — the scheduler is not
- * aborted.  After all functions have been given a turn, the index wraps back to
- * the first function.
+ * Resumes at most one coroutine per call. If the coroutine yields with a numeric
+ * value, it is interpreted as sleep seconds and the coroutine will not be
+ * resumed again until that time elapses.
  *
- * If no functions have been registered this call is a no-op (returns
- * immediately without sleeping).
+ * If all tasks are sleeping, AuxTasks() will sleep briefly (~1ms) to avoid
+ * busy-spinning.
  *
- * @param L  Active Lua state.
- * @return 0 (no values pushed onto stack).
+ * @param L Active Lua main state.
+ * @return 0
  */
 static int l_AuxTasks(lua_State * L)
 {
-  if (!aux_tasks_initialized || aux_task_count == 0) {
-    // Nothing registered — yield a small sleep to avoid busy-loop
+  if (!aux_tasks_initialized || aux_task_count <= 0) {
     std::this_thread::sleep_for(std::chrono::milliseconds(15));
     return 0;
   }
 
-  // Find the next valid (non-NOREF) slot in round-robin fashion.
-  // We try at most aux_task_count slots to handle gaps.
+  const double now = now_seconds_monotonic();
+
+  // Find one runnable task (not finished and not sleeping) in RR order.
   int tried = 0;
-  while (tried < aux_task_count) {
-    int slot = aux_task_index % aux_task_count;
-    aux_task_index = (slot + 1) % aux_task_count;  // advance for next call
-    ++tried;
-
-    int ref = aux_task_refs[slot];
-    if (ref == LUA_NOREF || ref == LUA_REFNIL) {
-      continue;  // slot was skipped during registration
-    }
-
-    // Push the function from the registry onto the stack
-    lua_rawgeti(L, LUA_REGISTRYINDEX, ref);
-
-    if (!lua_isfunction(L, -1)) {
-      lua_pop(L, 1);
+  int selected = -1;
+  for (; tried < aux_task_count; ++tried) {
+    const int idx = (aux_task_index + tried) % aux_task_count;
+    AuxTask & task = aux_tasks[idx];
+    if (!task.alive || task.thread == nullptr) {
       continue;
     }
-
-    // Call the function with zero arguments and zero expected results.
-    // Use lua_pcall so errors don't propagate and kill the scheduler.
-    int rc = lua_pcall(L, 0, 0, 0);
-    if (rc != LUA_OK) {
-      const char * err = lua_tostring(L, -1);
-      std::cerr << "[DeltaAPI] AuxTasks: error in slot " << slot
-                << ": " << (err ? err : "(unknown error)") << "\n";
-      lua_pop(L, 1);  // pop error message
+    if (now >= task.wake_at) {
+      selected = idx;
+      break;
     }
-    break;  // one function per AuxTasks() call — round-robin
+  }
+
+  // Advance RR pointer for next invocation (even if no runnable task found).
+  aux_task_index = (aux_task_index + 1) % aux_task_count;
+
+  if (selected < 0) {
+    // All alive tasks are sleeping; back off a bit.
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    return 0;
+  }
+
+  AuxTask & task = aux_tasks[selected];
+  lua_State * T = task.thread;
+
+  // Resume coroutine with 0 args.
+  int nres = 0;
+  const int rc = lua_resume(T, L, 0, &nres);
+
+  if (rc == LUA_YIELD) {
+    // Interpret yielded value as sleep seconds (optional).
+    const double sleep_s = parse_yield_sleep_seconds(T);
+    task.wake_at = now_seconds_monotonic() + sleep_s;
+  } else if (rc == LUA_OK) {
+    // Finished; mark dead.
+    task.alive = false;
+    task.wake_at = 0.0;
+    lua_settop(T, 0);
+  } else {
+    // Error: lua_resume leaves error message on T stack.
+    const char * err = lua_tostring(T, -1);
+    std::cerr << "[DeltaAPI] AuxTasks: error in task " << selected
+              << ": " << (err ? err : "(unknown error)") << "\n";
+    lua_settop(T, 0);
+    task.alive = false;
   }
 
   return 0;
@@ -972,12 +1018,7 @@ static const luaL_Reg delta_api_funcs[] = {
 void register_delta_api(lua_State * L)
 {
   // Initialise aux-task scheduler state (idempotent on repeated calls)
-  for (int i = 0; i < MAX_AUX_TASKS; ++i) {
-    aux_task_refs[i] = LUA_NOREF;
-  }
-  aux_task_count        = 0;
-  aux_task_index        = 0;
-  aux_tasks_initialized = false;
+  reset_aux_tasks(L);
 
   // Register metatables
   register_point_expr_mt(L);
@@ -989,14 +1030,14 @@ void register_delta_api(lua_State * L)
     lua_setglobal(L, fn->name);
   }
 
-  // ON / OFF string constants — main.txt uses: if DI(14) == ON then ...
+  // ON / OFF string constants — scripts use: if DI(14) == ON then ...
   lua_pushstring(L, "ON");
   lua_setglobal(L, "ON");
   lua_pushstring(L, "OFF");
   lua_setglobal(L, "OFF");
 
   std::cout << "[DeltaAPI] Delta API bindings registered "
-               "(SocketClass, ON/OFF, X/Y/Z/RX/RY/RZ offsets, HomeAuto).\n";
+               "(coroutine AuxTasks, yielding DELAY/WAIT, SocketClass, ON/OFF, offsets, HomeAuto).\n";
 }
 
 }  // namespace drasim_lua

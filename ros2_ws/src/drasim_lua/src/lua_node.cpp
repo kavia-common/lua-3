@@ -1,6 +1,12 @@
 // drasim_lua/src/lua_node.cpp
 #include "drasim_lua/lua_node.hpp"
 #include "drasim_lua/delta_api_bindings.hpp"
+
+extern "C" {
+#include "lua.h"
+#include "lauxlib.h"
+}
+
 #include <iostream>
 #include <stdexcept>
 

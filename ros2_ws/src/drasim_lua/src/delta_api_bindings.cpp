@@ -26,6 +26,56 @@ static bool status_to_bool(const char * s) { return s && std::string(s) == "ON";
 static void push_on_off(lua_State * L, bool v) { lua_pushstring(L, v ? "ON" : "OFF"); }
 
 // ---------------------------------------------------------------------------
+// Robot Control functions (new in current DeltaAPI.txt revision)
+// ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// RobotServoOn() -- Activate all-axis servo motors.
+//
+// Must be called before any motion command.  If motion is commanded while the
+// servo motors are inactive, the controller issues an alarm.
+// ---------------------------------------------------------------------------
+static int l_RobotServoOn(lua_State * L)
+{
+  (void)L;
+  std::cout << "[DeltaAPI] RobotServoOn: all-axis servo motors activated.\n";
+  return 0;
+}
+
+// ---------------------------------------------------------------------------
+// RobotServoOff() -- Deactivate all-axis servo motors.
+//
+// Places the robot in a safe, unpowered state.  Ensure the robot is at rest
+// before calling this function.
+// ---------------------------------------------------------------------------
+static int l_RobotServoOff(lua_State * L)
+{
+  (void)L;
+  std::cout << "[DeltaAPI] RobotServoOff: all-axis servo motors deactivated.\n";
+  return 0;
+}
+
+// ---------------------------------------------------------------------------
+// MotionStop([Mode]) -- Decelerate and stop ongoing robot motion.
+//
+// Mode (optional string):
+//   omitted  -- decelerate according to current deceleration setting.
+//   "FBK"    -- stop at current-point speed and reset position error
+//               (advanced use with torque saturation commands).
+// ---------------------------------------------------------------------------
+static int l_MotionStop(lua_State * L)
+{
+  const char * mode = luaL_optstring(L, 1, "");
+  if (mode && std::string(mode) == "FBK") {
+    std::cout << "[DeltaAPI] MotionStop(\"FBK\"): stopping at current point speed, "
+                 "resetting position error.\n";
+  } else {
+    std::cout << "[DeltaAPI] MotionStop(): decelerating to stop.\n";
+  }
+  return 0;
+}
+
+// ---------------------------------------------------------------------------
 // DI(pin [,length]) -> "ON"/"OFF" | bitmask
 // ---------------------------------------------------------------------------
 static int l_DI(lua_State * L)
@@ -251,16 +301,23 @@ static int l_split(lua_State * L)
 // Function registration table
 // ---------------------------------------------------------------------------
 static const luaL_Reg delta_api_funcs[] = {
+  /* Robot Control (new in current DeltaAPI.txt revision) */
+  {"RobotServoOn",   l_RobotServoOn},
+  {"RobotServoOff",  l_RobotServoOff},
+  {"MotionStop",     l_MotionStop},
+  /* I/O */
   {"DI",             l_DI},
   {"DO",             l_DO},
   {"ExtDI",          l_ExtDI},
   {"ExtDO",          l_ExtDO},
   {"ReadModbus",     l_ReadModbus},
   {"WriteModbus",    l_WriteModbus},
+  /* Motion */
   {"MovJ",           l_MovJ},
   {"MovL",           l_MovL},
   {"MovP",           l_MovP},
   {"DELAY",          l_DELAY},
+  /* Speed / Accuracy */
   {"SpdJ",           l_SpdJ},
   {"AccJ",           l_AccJ},
   {"DecJ",           l_DecJ},
@@ -268,11 +325,15 @@ static const luaL_Reg delta_api_funcs[] = {
   {"AccL",           l_AccL},
   {"DecL",           l_DecL},
   {"Accur",          l_Accur},
+  /* Point management */
   {"SetGlobalPoint", l_SetGlobalPoint},
   {"ReadPoint",      l_ReadPoint},
+  /* Synchronization */
   {"WAIT",           l_WAIT},
+  /* Multi-task */
   {"AuxTasksAdd",    l_AuxTasksAdd},
   {"AuxTasks",       l_AuxTasks},
+  /* Utility */
   {"split",          l_split},
   {nullptr, nullptr}
 };
@@ -280,6 +341,11 @@ static const luaL_Reg delta_api_funcs[] = {
 // PUBLIC_INTERFACE
 /**
  * @brief Register all Delta API functions as Lua globals in the given state.
+ *
+ * Iterates the delta_api_funcs registration table and pushes every function
+ * into the Lua global environment so scripts can call them directly by name
+ * (e.g. RobotServoOn(), DI(1), MovP("GL_P1")) without any module prefix.
+ *
  * @param L  Active Lua state.
  */
 void register_delta_api(lua_State * L)
@@ -288,7 +354,8 @@ void register_delta_api(lua_State * L)
     lua_pushcfunction(L, fn->func);
     lua_setglobal(L, fn->name);
   }
-  std::cout << "[DeltaAPI] Delta API bindings registered.\n";
+  std::cout << "[DeltaAPI] Delta API bindings registered (includes RobotServoOn, "
+               "RobotServoOff, MotionStop).\n";
 }
 
 }  // namespace drasim_lua

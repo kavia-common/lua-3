@@ -6,6 +6,7 @@
 ** module table) WITHOUT the "delta_" prefix.  The C function names still use
 ** the conventional "delta_" prefix internally so as not to pollute the C
 ** namespace, but the names visible from Lua are the bare command names:
+**   RobotServoOn, RobotServoOff, MotionStop,
 **   DI, DO, ExtDI, ExtDO, MovP, MovL, MovJ, SetGlobalPoint, ReadPoint,
 **   SpdJ, AccJ, DecJ, SpdL, AccL, DecL, Accur, WAIT, DELAY,
 **   ReadModbus, WriteModbus, SocketClass, SocketServer, CheckAllStatus,
@@ -30,6 +31,69 @@
  * Helper macro – push a string result and return 1.
  * ========================================================================= */
 #define DELTA_PUSH_STR(L, s)  do { lua_pushstring((L), (s)); return 1; } while (0)
+
+
+/* =========================================================================
+ * Robot Control functions (new in current DeltaAPI.txt revision)
+ * ========================================================================= */
+
+/*
+** delta_RobotServoOn -- Activate all-axis servo motors.
+**
+** Lua syntax:  RobotServoOn()
+**
+** Must be called before issuing any motion command.  If motion is commanded
+** while the servo motors are inactive, the controller issues an alarm and
+** refuses the motion.
+**
+** Returns: nothing (stub).
+*/
+/* PUBLIC_INTERFACE */
+static int delta_RobotServoOn (lua_State *L) {
+  (void)L; /* stub -- no operation */
+  return 0;
+}
+
+
+/*
+** delta_RobotServoOff -- Deactivate all-axis servo motors.
+**
+** Lua syntax:  RobotServoOff()
+**
+** Places the robot in a safe, unpowered state after motion tasks are
+** complete.  It is recommended to ensure the robot is at rest before
+** calling this function.
+**
+** Returns: nothing (stub).
+*/
+/* PUBLIC_INTERFACE */
+static int delta_RobotServoOff (lua_State *L) {
+  (void)L; /* stub -- no operation */
+  return 0;
+}
+
+
+/*
+** delta_MotionStop -- Decelerate and stop ongoing robot motion.
+**
+** Lua syntax:
+**   MotionStop()
+**   MotionStop(Mode)
+**
+** Parameters:
+**   Mode (string, optional) -- when omitted the robot decelerates according
+**        to the current deceleration setting.  When set to "FBK" the robot
+**        stops at the speed of the current point and resets the position
+**        error; this mode is intended for use with torque saturation commands
+**        (advanced application).
+**
+** Returns: nothing (stub).
+*/
+/* PUBLIC_INTERFACE */
+static int delta_MotionStop (lua_State *L) {
+  (void)L; /* stub -- no operation */
+  return 0;
+}
 
 
 /* =========================================================================
@@ -607,11 +671,13 @@ static int delta_split (lua_State *L) {
  * name "delta" (LUA_DELTAAPI_LIBNAME) so that scripts can do:
  *
  *     local delta = require("delta")
+ *     delta.RobotServoOn()
  *     delta.DI(1)
  *
  * and, because linit.c registers it into the global table, scripts can also
  * call the functions directly:
  *
+ *     RobotServoOn()
  *     DI(1)
  *     MovP("GL_P1")
  *
@@ -619,6 +685,10 @@ static int delta_split (lua_State *L) {
 
 /* Registration table – Lua-visible names have NO "delta_" prefix */
 static const luaL_Reg deltalib[] = {
+  /* Robot Control (new in current DeltaAPI.txt revision) */
+  {"RobotServoOn",    delta_RobotServoOn},
+  {"RobotServoOff",   delta_RobotServoOff},
+  {"MotionStop",      delta_MotionStop},
   /* I/O */
   {"DI",              delta_DI},
   {"DO",              delta_DO},
@@ -680,7 +750,8 @@ LUAMOD_API int luaopen_deltaapi (lua_State *L) {
 
   /*
   ** Also inject every function into the global environment so that
-  ** Delta robot scripts can call e.g. DI(1) without a module prefix.
+  ** Delta robot scripts can call e.g. RobotServoOn() / DI(1) without
+  ** a module prefix.
   */
   for (entry = deltalib; entry->name != NULL; entry++) {
     lua_pushcfunction(L, entry->func);
